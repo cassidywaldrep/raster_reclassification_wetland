@@ -200,34 +200,12 @@ tm_basemap("Esri.WorldImagery") +
   tm_dots(size = 0.3, fill = "blue") 
 
 #---------------------------------------------------------------------------#
-###### Figuring out what to use as a wetland rule 
+###### Graphing one bird to see the map
 #---------------------------------------------------------------------------#
 
-gps <- read.csv("data/broodrearing_data_withdates_nofly_readyfordbbm_23Jan2026.csv")
+gps <- read_csv("data/broodrearing_data_withdates_nofly_readyfordbbm_23Jan2026.csv")
 
 contour <- st_read("results/brood_contours_26Jan26.gpkg")
-
-brood_withwetland <- read_csv("data/fullrun_brooding_habitatproportions_3levels_26Jan26.csv") %>%
-  filter(contour == "95") %>%
-  dplyr::select(Landcover, percentage, id) %>%
-  group_by(id) %>%
-  filter(Landcover == "wetland") %>%
-  ungroup()
-
-brood_withmarsh<- read_csv("data/fullrun_brooding_habitatproportions_3levels_26Jan26.csv") %>%
-  filter(contour == "95") %>%
-  dplyr::select(Landcover, percentage, id) %>%
-  group_by(id) %>%
-  filter(any(Landcover == "marsh")) %>%
-  ungroup()
-
-brood_withswamp<- read_csv("data/fullrun_brooding_habitatproportions_3levels_26Jan26.csv") %>%
-  filter(contour == "95") %>%
-  dplyr::select(Landcover, percentage, id) %>%
-  group_by(id) %>%
-  filter(Landcover == "swamp", 
-         percentage > 10) %>%
-  ungroup()
 
 nalc_legend <- data.frame(
   Landcover = 0:25,
@@ -272,12 +250,6 @@ pal_all <- c(
   "#92c5de"   #25 Open shallow waters
 )
 
-  
-# let's first look at our swamp birds...what are they surrounded with?
-
-swamp_birds <- unique(brood_withswamp$id) 
-
-for (bird %in% swamp_birds) {
 
 tmap_mode("view")
 gps_id <- gps %>%
@@ -323,21 +295,24 @@ tm_basemap("Esri.WorldImagery") +
   tm_dots(size = 0.2, 
           fill = "blue") 
 
-}
 
 
-
+#---------------------------------------------------------------------------#
+###### current methodology
+#---------------------------------------------------------------------------#
 
 layer <- terra::rast("data/map_data/commondata/raster_data/IVC_Groups_v2022_1pt0_WashPatch.tif")
 
 prop_bird <- read_csv("data/fullrun_brooding_habitatproportions_3levels_26Jan26.csv") %>%
-  filter(contour == "95") 
+  filter(contour == "95", 
+         !id %in% c("213720102_2022", "225744854_2025"))
+
+prop_bird %>%
+  filter(Landcover == "wetland")
   
 birds <- unique(prop_bird$id)
 
 updated_brooding_proportions <- list()
-list_of_other <- list()
-
 
 for (bird in birds) {
   
@@ -347,6 +322,7 @@ gps_id <- gps %>%
   st_transform(st_crs(habitat_raster))
 
 gps_buffered <- st_buffer(st_transform(gps_id, st_crs(habitat_raster)), dist = 1000)
+
 crop_extent <- gps_buffered %>% 
   st_bbox() %>% 
   st_as_sfc() %>% 
@@ -388,24 +364,20 @@ extracted_comparison <- terra::extract(detailed_wetlands, contour_vect, weights 
   mutate(new_hab = case_when(
     grepl("swamp", ClassName, ignore.case = TRUE) ~ "24",
     grepl("marsh", ClassName, ignore.case = TRUE) ~ "23",
-    grepl("forest|woodland|tree", ClassName, ignore.case = TRUE) ~ "2",
+    grepl("forest|woodland|tree|pine", ClassName, ignore.case = TRUE) ~ "2",
     grepl("shrubland", ClassName, ignore.case = TRUE) ~ "7",
+    grepl("grassland|prairie|meadow", ClassName, ignore.case = TRUE) ~ "9",
     grepl("fen|bog", ClassName, ignore.case = TRUE) ~ "22",
     grepl("agriculture", ClassName, ignore.case = TRUE) ~ "15",
     grepl("developed", ClassName, ignore.case = TRUE) ~ "17",
-    grepl("rock", ClassName, ignore.case = TRUE) ~ "13", # barren
+    grepl("rock|bluff|beach|cliff", ClassName, ignore.case = TRUE) ~ "13", # barren
+    grepl("water", ClassName, ignore.case = TRUE) ~ "18", # barren
     TRUE ~ "Other" # Catches anything that doesn't match the above
   )) %>% 
   mutate(row_id = row_number()) %>%
   select(-ID, -weight)
 
 hab_df <- as.data.frame(hab_values) 
-
-list_of_other <- hab_df %>%
-  left_join(extracted_comparison, by = "row_id") %>%
-  filter(reclass == 14, new_hab == "Other")
-
-list_of_other[[bird]] <- list_of_other
 
 final_combined <- hab_df %>%
   left_join(extracted_comparison, by = "row_id") %>%
@@ -443,19 +415,186 @@ updated <- final_combined %>%
   select(Landcover, percentage) %>%
   mutate(id = bird)
 
-updated_brooding_proportions[[bird]] <- updated
+wetland_row <- updated %>%
+  filter(Landcover == "wetland")
 
-print(bird)
+has_wetland <- any(nrow(wetland_row))
+
+# Create a copy of the cropped habitat to modify
+hab_refined <- hab_crop
+
+hab_extraction <- terra::extract(hab_crop, contour_vect, cells = TRUE, weights = TRUE) %>%
+  mutate(row_id = row_number())
+
+
+# Update the cells in the raster using the results from your join/mutate
+# We use the cell indices extracted earlier
+hab_refined[hab_extraction$cell] <- as.numeric(final_combined$reclass)
+
+if (has_wetland) {
+
+wetland_majority_fun <- function(x) {
+  center_idx <- ceiling(length(x) / 2)
+  center <- x[center_idx]
+  
+  # Ignore NAs or non-wetland pixels
+  if (is.na(center) || center != 14) {
+    return(center)
+  }
+  
+  # Get all neighbors INCLUDING other wetlands (14s)
+  # But we still remove NAs to avoid calculation errors
+  nbrs <- x[!is.na(x)]
+  
+  # Calculate frequencies
+  counts <- table(nbrs)
+  
+  # Find the most frequent value
+  # names(counts) gives the class IDs, counts gives the frequency
+  majority_class <- as.numeric(names(counts)[which.max(counts)])
+  
+  return(majority_class)
+}
+
+hab_context <- terra::focal(
+  hab_refined,
+  w = matrix(1, 5, 5), 
+  fun = wetland_majority_fun
+)
+
+final_combined <- terra::extract(hab_context, contour_vect, weights = TRUE)
+
+  # 2. Convert to the final summary table
+  final_habitat_summary <- final_combined %>%
+    # rename the raster column (terra often names it after the layer) to 'reclass'
+    rename(reclass = 2) %>%
+    mutate(
+      Landcover = case_when(
+        reclass == 0 ~ "water",
+        reclass %in% 1:6 ~ "forest",
+        reclass %in% 7:8 ~ "shrubland",
+        reclass %in% 9:12 ~ "grassland",
+        reclass == 14 ~ "wetland", # Should be 0% if the fill-in ran!
+        reclass %in% c(20,21,22) ~ "peatland",
+        reclass == 23 ~ "swamp",
+        reclass == 24 ~ "marsh",
+        reclass == 25 ~ "open_shallow_water",
+        reclass == 15 ~ "cropland",
+        reclass %in% c(13,16) ~ "barren",
+        reclass == 17 ~ "urban",
+        reclass == 18 ~ "water",
+        reclass == 19 ~ "snow_ice",
+        TRUE ~ "Other"
+      )
+    ) %>%
+    group_by(Landcover) %>%
+    summarise(weighted_sum = sum(weight, na.rm = TRUE), .groups = "drop") %>%
+    mutate(
+      total_weights = sum(weighted_sum),
+      percentage = (weighted_sum / total_weights) * 100,
+      id = bird # Link it back to the specific bird
+    ) %>%
+    select(id, Landcover, percentage)
+
+} else {
+  
+final_habitat_summary <- updated
+  
+  
+}
+
+
+
+# 
+# # if it has less than 10% wetlands, make it the habitat of the closest pixel
+# 
+# hab_extraction <- terra::extract(hab_crop, contour_vect, cells = TRUE, weights = TRUE) %>%
+#   mutate(row_id = row_number())
+# 
+# hab_final <- hab_crop
+# 
+# wetland_row <- updated %>% 
+#   filter(Landcover == "wetland")
+# 
+# has_wetland <- any(nrow(wetland_row) > 0 && wetland_row$percentage < 10)
+# 
+# 
+# 
+# if (has_wetland) {
+#   
+#   # this is taking our new reclass values, and assigning them into hab_final
+#   
+#   hab_final[hab_extraction$cell] <- as.numeric(final_combined$reclass)
+#   
+#   # assign remaining wetland pixels to be NA
+#   
+#   hab_fill_prep <- hab_final
+#   hab_fill_prep[hab_final == 14] <- NA
+#   
+#   # find the closest pixel and assign it that value 
+#   
+#   d <- terra::distance(hab_fill_prep, values = TRUE)
+#   
+#   hab_final_updated <- hab_final
+#   
+#   hab_final_updated[hab_final == 14] <- d[hab_final == 14]
+#   
+#   final_combined <- terra::extract(hab_final_updated, contour_vect, weights = TRUE)
+#   
+#   # 2. Convert to the final summary table
+#   final_habitat_summary <- final_combined %>%
+#     # rename the raster column (terra often names it after the layer) to 'reclass'
+#     rename(reclass = 2) %>% 
+#     mutate(
+#       Landcover = case_when(
+#         reclass == 0 ~ "water",
+#         reclass %in% 1:6 ~ "forest",
+#         reclass %in% 7:8 ~ "shrubland",
+#         reclass %in% 9:12 ~ "grassland",
+#         reclass == 14 ~ "wetland", # Should be 0% if the fill-in ran!
+#         reclass %in% c(20,21,22) ~ "peatland",
+#         reclass == 23 ~ "swamp",
+#         reclass == 24 ~ "marsh",
+#         reclass == 25 ~ "open_shallow_water",
+#         reclass == 15 ~ "cropland",
+#         reclass %in% c(13,16) ~ "barren",
+#         reclass == 17 ~ "urban",
+#         reclass == 18 ~ "water",
+#         reclass == 19 ~ "snow_ice",
+#         TRUE ~ "Other"
+#       )
+#     ) %>%
+#     group_by(Landcover) %>%
+#     summarise(weighted_sum = sum(weight, na.rm = TRUE), .groups = "drop") %>%
+#     mutate(
+#       total_weights = sum(weighted_sum),
+#       percentage = (weighted_sum / total_weights) * 100,
+#       id = bird # Link it back to the specific bird
+#     ) %>%
+#     select(id, Landcover, percentage)
+#   
+# } else {
+#   
+#   final_habitat_summary <- updated
+# }
+# 
+# updated_brooding_proportions[[bird]] <- final_habitat_summary
+# 
+# print(bird)
 
 }
 
 updated_brooding_proportions <- dplyr::bind_rows(updated_brooding_proportions)
-list_of_other <- dplyr::bind_rows(list_of_other)
 
-updated_brooding_proportions %>% 
+
+updated_brooding_proportions %>%
   filter(Landcover == "wetland")
 
-### mapping 
+
+#---------------------------------------------------------------------------#
+###### Graphing
+#---------------------------------------------------------------------------#
+
 
 habitat_final_map <- hab_crop
 final_combined$reclass_num <- as.numeric(final_combined$reclass)
@@ -513,7 +652,7 @@ pal_all <- c(
 
 levels_table <- data.frame(ID = 0:25, class = nalc_legend$class)
 levels(hab_crop) <- levels_table
-levels(habitat_final_map) <- levels_table
+levels(hab_context) <- levels_table
 
 tm_basemap("Esri.WorldImagery") +
   
@@ -527,7 +666,7 @@ tm_basemap("Esri.WorldImagery") +
     palette = pal_all) +
   
   
-  tm_shape(habitat_final_map) +
+  tm_shape(hab_context) +
   tm_raster(
     title = "updated raster",
     style = "cat",
@@ -557,6 +696,9 @@ swamp_val <- nalc_legend %>%
 
 # 2. Results Container
 results_list <- list()
+
+swamp_birds <- brood_withswamp$id
+
 
 for (bird in swamp_birds) {
   
@@ -605,7 +747,7 @@ for (bird in swamp_birds) {
 swamp_prop <- bind_rows(results_list)
 
 swamp_prop %>%
-  group_by(value) %>%
+  group_by(class) %>%
   summarize(mean = mean(proportion), 
             sd = sd(proportion), 
             count = n()) %>%
@@ -617,8 +759,7 @@ brood_withmarsh<- read_csv("data/fullrun_brooding_habitatproportions_3levels_26J
   filter(contour == "95") %>%
   dplyr::select(Landcover, percentage, id) %>%
   group_by(id) %>%
-  filter(Landcover == "marsh", 
-         percentage > 10) %>%
+  filter(Landcover == "marsh") %>%
   ungroup()
 
 marsh_birds <- unique(brood_withmarsh$id)
@@ -678,7 +819,7 @@ for (bird in marsh_birds) {
 marsh_prop <- bind_rows(results_list)
 
 marsh_prop %>%
-  group_by(value) %>%
+  group_by(class) %>%
   summarize(mean = mean(proportion), 
             sd = sd(proportion), 
             count = n()) %>%
@@ -689,18 +830,24 @@ marsh_prop %>%
 
 ## wetland birds
 
+brood_withpeatland<- read_csv("data/fullrun_brooding_habitatproportions_3levels_26Jan26.csv") %>%
+  filter(contour == "95") %>%
+  dplyr::select(Landcover, percentage, id) %>%
+  group_by(id) %>%
+  filter(Landcover == "peatland") %>%
+  ungroup()
 
-wetland_birds <- unique(brood_withwetland$id)
-
-# 1. Define the swamp ID (Update this to match your actual NALC code for swamp)
-wetland_val <- nalc_legend %>% 
-  filter(class == "Wetland") %>% 
+# 1. Define the  ID (Update this to match your actual NALC code for peatland)
+peatland_val <- nalc_legend %>% 
+  filter(Landcover %in% 20:22) %>% 
   pull(Landcover)
+
+peatland_birds <- unique(brood_withpeatland$id)
 
 # 2. Results Container
 results_list <- list()
 
-for (bird in wetland_birds) {
+for (bird in peatland_birds) {
   
   # Filter contour for the specific bird
   bird_poly <- contour %>%
@@ -713,7 +860,7 @@ for (bird in wetland_birds) {
   bird_hab <- terra::crop(habitat_raster, terra::vect(bird_poly), mask = TRUE)
   
   # Create a binary mask (1 = Swamp, NA = Not Swamp)
-  wet_mask <- bird_hab == wetland_val
+  wet_mask <- bird_hab == peatland_val
   wet_mask[wet_mask == 0] <- NA
   
   # 3. Focal Analysis: Identify cells touching swamp (3x3 window)
@@ -743,10 +890,10 @@ for (bird in wetland_birds) {
 }
 
 # Combine all results into one dataframe
-wet_prop <- bind_rows(results_list)
+peatland_prop <- bind_rows(results_list)
 
-wet_prop %>%
-  group_by(value) %>%
+peatland_prop %>%
+  group_by(class) %>%
   summarize(mean = mean(proportion), 
             sd = sd(proportion), 
             count = n()) %>%
