@@ -21,7 +21,7 @@ contour <- st_read("results/brood_contours_26Jan26.gpkg")
 
 # habitat layer from doi: 10.5281/zenodo.15831967
 
-habitat_raster <- terra::rast("nalcms_updated.tif")
+habitat_raster <- terra::rast("data/nalcms_updated.tif")
 
 #---------------------------------------------------------------------------#
 ###### running wetland update reclassification 
@@ -30,7 +30,7 @@ habitat_raster <- terra::rast("nalcms_updated.tif")
 # reading in new habitat layer
 # this needs to be downloaded from https://www.arcgis.com/home/item.html?id=66c13612635d4ee9bd4d6500cf462e7f
 
-layer <- terra::rast("map_data/commondata/raster_data/IVC_Groups_v2022_1pt0_WashPatch.tif")
+layer <- terra::rast("data/map_data/commondata/raster_data/IVC_Groups_v2022_1pt0_WashPatch.tif")
 
 # reading in all birds, while filtering some out I don't want. 
 
